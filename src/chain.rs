@@ -105,6 +105,34 @@ fn elektron_regtest_genesis_header() -> BlockHeader {
     header
 }
 
+/// Elektron Net *testnet* genesis header, built from `CTestNetParams` in
+/// elektron-net's `src/kernel/chainparams.cpp` (genesis time 1781164421,
+/// nonce 7265942, bits 0x1d7fffff; same genesis merkle root as mainnet and
+/// regtest). `Network::Signet` is never used anywhere in this codebase or
+/// its CI, so it's repurposed as the Elektron-testnet stand-in -- point
+/// electrs at it with `network = "signet"` and `signet_magic = "0b110907"`
+/// (the elektrond testnet P2P magic) when testing against an actual
+/// Elektron Net node running `-testnet`, not against a real BIP325 signet.
+fn elektron_testnet_genesis_header() -> BlockHeader {
+    use bitcoin::hashes::Hash;
+    let header = BlockHeader {
+        version: bitcoin::blockdata::block::Version::from_consensus(1),
+        prev_blockhash: BlockHash::all_zeros(),
+        merkle_root: "0a7087d81dfb14868848c7e02da8408fe721540e63f6cab9a67d0dfc37b19b17"
+            .parse()
+            .expect("valid Elektron testnet genesis merkle root"),
+        time: 1781164421,
+        bits: bitcoin::CompactTarget::from_consensus(0x1d7fffff),
+        nonce: 7265942,
+    };
+    assert_eq!(
+        header.block_hash().to_string(),
+        "00000078233832d6ba39d7693ad96e9e6a8bc869a5f49cfaf4760f2c73c73e4f",
+        "Elektron testnet genesis header constants are inconsistent with chainparams.cpp"
+    );
+    header
+}
+
 impl Chain {
     // create an empty chain
     pub fn new(network: Network) -> Self {
@@ -115,7 +143,10 @@ impl Chain {
             // stand-in -- see elektron_regtest_genesis_header() above for
             // why Network::Regtest itself can't be repurposed here).
             Network::Testnet => elektron_regtest_genesis_header(),
-            // signet/regtest keep rust-bitcoin's genesis blocks, so the CI
+            // Elektron Net testnet (Network::Signet is its internal
+            // stand-in -- see elektron_testnet_genesis_header() above).
+            Network::Signet => elektron_testnet_genesis_header(),
+            // regtest keeps rust-bitcoin's genesis block, so the CI
             // docker integration test still runs against a stock Bitcoin
             // Core regtest.
             _ => bitcoin::blockdata::constants::genesis_block(network).header,

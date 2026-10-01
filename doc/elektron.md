@@ -106,6 +106,39 @@ Error codes used by this server:
 | 3 | block pruned — unavailable by design (this fork) |
 | -32700 … -32603 | standard JSON-RPC errors (upstream) |
 
+## Elektron testnet: `Network::Signet` as the stand-in
+
+The Elektron Net chainparams define a distinct **testnet** network
+(`CTestNetParams`: its own genesis, P2P magic `0b110907`, target spacing
+60 s, coinbase maturity 100, mandatory pruning with a shallower depth). electrs
+has a hardwired `Network` enum with no testnet slot free for a new chain:
+
+- `Network::Regtest` already serves as the stand-in for the Elektron
+  *regtest* chain (`elektron_regtest_genesis_header()`).
+- `Network::Signet` is unused everywhere in this codebase and its CI, so it
+  is repurposed as the Elektron-testnet stand-in instead of touching the Rust
+  bitcoin crate's enum: this fork adds
+  `elektron_testnet_genesis_header()` (genesis time 1781164421, nonce
+  7265942, bits `0x1d7fffff`, merkle root
+  `0a7087d8…b19b17` — all taken from `CTestNetParams`, asserted against the
+  real genesis block hash `00000078233832d6…c73e4f`) and seeds
+  `Network::Signet` with it.
+
+Configuration for an Elektron testnet daemon:
+
+```
+network = "signet"
+signet_magic = "0b110907"   # elektrond testnet P2P magic (CTestNetParams)
+```
+
+No utxo snapshot is needed on a young testnet: start electrs while the
+chain is still shorter than the daemon's retention window and let it index
+from genesis, exactly like a non-pruned network.
+
+Everything Bitcoin-specific on this slot (headers, blocks, scripthash
+indexing, electrum protocol) behaves identically to the other slots; the
+only Elektron-specific parts are the genesis constants and the magic.
+
 ## Not yet implemented (planned, see the integration guideline)
 
 - **§3.2 UTXO-snapshot bootstrap** of the scripthash index on first start
