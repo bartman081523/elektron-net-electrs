@@ -8,6 +8,7 @@ _*/
 .env
 *.dat
 electrs.toml
+/electrs-fx-test.toml
 data/
 tests/bitcoin-*
 tests/bin
