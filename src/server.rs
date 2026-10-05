@@ -7,11 +7,13 @@ use std::{
     io::{BufRead, BufReader, Write},
     iter::once,
     net::{Shutdown, TcpListener, TcpStream},
+    sync::Arc,
 };
 
 use crate::{
     config::Config,
     electrum::{Client, Rpc},
+    fx::{self, RateState},
     metrics::{self, Metrics},
     signals::ExitError,
     thread::spawn,
@@ -64,6 +66,14 @@ fn serve() -> Result<()> {
     let config = Config::from_args();
     let metrics = Metrics::new(config.monitoring_addr)?;
 
+    // Elektron Net FX: one background thread refreshes conversion rates
+    // (registry rate.json, cost-floor fallback) and renders them into the
+    // Electrum banner, "blockchain.fx.rates" and the optional snapshot file
+    // (see src/fx.rs).
+    let fx_config = fx::FxConfig::from_config(&config);
+    let rate_state = Arc::new(RateState::new());
+    fx::spawn_fetcher(fx_config, rate_state.clone());
+
     let (server_tx, server_rx) = unbounded();
     if !config.disable_electrum_rpc {
         let listener = TcpListener::bind(config.electrum_rpc_addr)?;
@@ -83,7 +93,7 @@ fn serve() -> Result<()> {
         "step",
         metrics::default_duration_buckets(),
     );
-    let mut rpc = Rpc::new(&config, metrics)?;
+    let mut rpc = Rpc::new(&config, metrics, rate_state)?;
 
     let new_block_rx = rpc.new_block_notification();
     let mut peers = HashMap::<usize, Peer>::new();

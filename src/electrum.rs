@@ -14,11 +14,13 @@ use std::collections::{hash_map::Entry, HashMap};
 use std::fmt;
 use std::iter::FromIterator;
 use std::str::FromStr;
+use std::sync::Arc;
 
 use crate::{
     cache::Cache,
     config::{Config, ELECTRS_VERSION},
     daemon::{self, extract_bitcoind_error, Daemon},
+    fx::RateState,
     merkle::Proof,
     metrics::{self, Histogram, Metrics},
     signals::Signal,
@@ -156,12 +158,16 @@ pub struct Rpc {
     daemon: Daemon,
     signal: Signal,
     banner: String,
+    /// Elektron Net FX: shared conversion-rate state, refreshed by the fx
+    /// fetcher thread (see src/fx.rs). Rendered into the banner and exposed
+    /// via "blockchain.fx.rates" - no exchange exists for ELEK.
+    fx: Arc<RateState>,
     port: u16,
 }
 
 impl Rpc {
     /// Perform initial index sync (may take a while on first run).
-    pub fn new(config: &Config, metrics: Metrics) -> Result<Self> {
+    pub fn new(config: &Config, metrics: Metrics, fx: Arc<RateState>) -> Result<Self> {
         let rpc_duration = metrics.histogram_vec(
             "rpc_duration",
             "RPC duration (in seconds)",
@@ -180,6 +186,7 @@ impl Rpc {
             daemon,
             signal,
             banner: config.server_banner.clone(),
+            fx,
             port: config.electrum_rpc_addr.port(),
         })
     }
@@ -513,6 +520,17 @@ impl Rpc {
         }))
     }
 
+    /// Electrum console banner with a live conversion-rate line appended
+    /// (the configured `server_banner` stays as the first line). Sources
+    /// without any exchange are labeled as such - see src/fx.rs.
+    fn banner_with_fx(&self) -> String {
+        format!("{}\n{}", self.banner, self.fx.banner_line())
+    }
+
+    fn fx_rates(&self) -> Result<Value> {
+        Ok(self.fx.rpc_json())
+    }
+
     pub fn handle_requests(&self, client: &mut Client, lines: &[String]) -> Vec<String> {
         lines
             .iter()
@@ -587,18 +605,20 @@ impl Rpc {
                 match &call.params {
                     Params::BlockHeader(_)
                     | Params::BlockHeaders(_)
+                    | Params::FxRates
                     | Params::HeadersSubscribe
                     | Params::Version(_) => (),
                     _ => return error_msg(&call.id, RpcError::UnavailableIndex),
                 };
             }
             let result = match &call.params {
-                Params::Banner => Ok(json!(self.banner)),
+                Params::Banner => Ok(json!(self.banner_with_fx())),
                 Params::BlockHeader(args) => self.block_header(*args),
                 Params::BlockHeaders(args) => self.block_headers(*args),
                 Params::Donation => Ok(Value::Null),
                 Params::EstimateFee(args) => self.estimate_fee(*args),
                 Params::Features => self.features(),
+                Params::FxRates => self.fx_rates(),
                 Params::HeadersSubscribe => self.headers_subscribe(client),
                 Params::MempoolFeeHistogram => self.get_fee_histogram(),
                 Params::PeersSubscribe => Ok(json!([])),
@@ -629,6 +649,7 @@ enum Params {
     Donation,
     EstimateFee((u16,)),
     Features,
+    FxRates,
     HeadersSubscribe,
     MempoolFeeHistogram,
     PeersSubscribe,
@@ -651,6 +672,7 @@ impl Params {
             "blockchain.block.header" => Params::BlockHeader(convert(params)?),
             "blockchain.block.headers" => Params::BlockHeaders(convert(params)?),
             "blockchain.estimatefee" => Params::EstimateFee(convert(params)?),
+            "blockchain.fx.rates" => Params::FxRates,
             "blockchain.headers.subscribe" => Params::HeadersSubscribe,
             "blockchain.relayfee" => Params::RelayFee,
             "blockchain.scripthash.get_balance" => Params::ScriptHashGetBalance(convert(params)?),

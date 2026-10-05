@@ -156,3 +156,21 @@ doc = "Logging filters, overriding `RUST_LOG` environment variable (see https://
 name = "signet_magic"
 type = "String"
 doc = "network magic in hex format, overriding the network default (Elektron Net mainnet: e1ec7a6e), as found in the daemon's logs"
+
+# ---- Elektron Net FX: conversion rates without an exchange (see src/fx.rs) ----
+[[param]]
+name = "fx_rate_url"
+type = "String"
+doc = "URL of the project's conversion-rate file (registry rate.json, fetched periodically). Set to an empty string to disable the registry source. When the fetch fails, the mining cost-floor model is used as fallback."
+default = "\"https://raw.githubusercontent.com/kutlusoy/elektron-net-registry/main/rate.json\".to_owned()"
+
+[[param]]
+name = "fx_refresh_secs"
+type = "u64"
+doc = "How often conversion rates are refreshed, in seconds"
+default = "300"
+
+[[param]]
+name = "fx_snapshot_path"
+type = "std::path::PathBuf"
+doc = "Write conversion rates as a JSON file in mempool /api/v1/prices shape (for the elektron-net mempool fork) to this path. Leave unset to disable."

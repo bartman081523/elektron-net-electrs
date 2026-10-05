@@ -152,9 +152,14 @@ pub struct Config {
     pub skip_block_download_wait: bool,
     pub disable_electrum_rpc: bool,
     pub server_banner: String,
+    /// Elektron Net FX: conversion rates without an exchange (see src/fx.rs).
+    pub fx_rate_url: String,
+    pub fx_refresh: Duration,
+    pub fx_snapshot_path: Option<PathBuf>,
     pub signet_magic: Magic,
 }
 
+#[derive(Clone)]
 pub struct SensitiveAuth(pub Auth);
 
 impl SensitiveAuth {
@@ -382,6 +387,9 @@ impl Config {
             skip_block_download_wait: config.skip_block_download_wait,
             disable_electrum_rpc: config.disable_electrum_rpc,
             server_banner: config.server_banner,
+            fx_rate_url: config.fx_rate_url,
+            fx_refresh: Duration::from_secs(config.fx_refresh_secs),
+            fx_snapshot_path: config.fx_snapshot_path,
             signet_magic: magic,
         };
         eprintln!(

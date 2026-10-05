@@ -13,6 +13,7 @@ mod config;
 mod daemon;
 mod db;
 mod electrum;
+mod fx;
 mod index;
 mod mempool;
 mod merkle;
