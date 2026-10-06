@@ -3,6 +3,8 @@ use bitcoin::Network;
 use bitcoincore_rpc::Auth;
 use dirs_next::home_dir;
 
+use crate::fx::SensitiveUserPass;
+
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::net::SocketAddr;
@@ -156,6 +158,16 @@ pub struct Config {
     pub fx_rate_url: String,
     pub fx_refresh: Duration,
     pub fx_snapshot_path: Option<PathBuf>,
+    /// Rich-shape rates file (source/market metadata) for the elek-web /fx route.
+    pub fx_rates_path: Option<PathBuf>,
+    /// Live P2P market source: the kdf daemon whose order book defines the
+    /// market rate whenever one exists (empty url disables, see src/fx.rs).
+    pub fx_orderbook_rpc_url: String,
+    /// Never logged — redacted `Debug` (`<sensitive>`), like `daemon_auth`.
+    pub fx_orderbook_userpass: SensitiveUserPass,
+    pub fx_orderbook_base: String,
+    pub fx_orderbook_rel: String,
+    pub fx_btc_prices_url: String,
     pub signet_magic: Magic,
 }
 
@@ -390,6 +402,12 @@ impl Config {
             fx_rate_url: config.fx_rate_url,
             fx_refresh: Duration::from_secs(config.fx_refresh_secs),
             fx_snapshot_path: config.fx_snapshot_path,
+            fx_rates_path: config.fx_rates_path,
+            fx_orderbook_rpc_url: config.fx_orderbook_rpc_url,
+            fx_orderbook_userpass: SensitiveUserPass(config.fx_orderbook_userpass),
+            fx_orderbook_base: config.fx_orderbook_base,
+            fx_orderbook_rel: config.fx_orderbook_rel,
+            fx_btc_prices_url: config.fx_btc_prices_url,
             signet_magic: magic,
         };
         eprintln!(

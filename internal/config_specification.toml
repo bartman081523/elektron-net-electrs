@@ -174,3 +174,38 @@ default = "300"
 name = "fx_snapshot_path"
 type = "std::path::PathBuf"
 doc = "Write conversion rates as a JSON file in mempool /api/v1/prices shape (for the elektron-net mempool fork) to this path. Leave unset to disable."
+
+[[param]]
+name = "fx_rates_path"
+type = "std::path::PathBuf"
+doc = "Write conversion rates as a JSON file with full source/market metadata (consumed by the elek-web /fx route) to this path. Leave unset to disable."
+
+[[param]]
+name = "fx_orderbook_rpc_url"
+type = "String"
+doc = "HTTP JSON-RPC root URL of the market daemon (kdf) whose P2P order book defines the live market rate, e.g. http://127.0.0.1:7796. Set to an empty string (the default) to disable this source; the rate then falls back to the registry file and the mining cost floor."
+default = "\"\".to_owned()"
+
+[[param]]
+name = "fx_orderbook_userpass"
+type = "String"
+doc = "userpass of the market daemon's RPC, passed as the JSON body's userpass field. Never logged."
+default = "\"\".to_owned()"
+
+[[param]]
+name = "fx_orderbook_base"
+type = "String"
+doc = "Base ticker of the order book pair the market rate is read from"
+default = "\"ELEK\".to_owned()"
+
+[[param]]
+name = "fx_orderbook_rel"
+type = "String"
+doc = "Quote ticker of the order book pair. USD/USDT books are used as USD rates directly; BTC books are converted with the reference prices from fx_btc_prices_url"
+default = "\"BTC\".to_owned()"
+
+[[param]]
+name = "fx_btc_prices_url"
+type = "String"
+doc = "URL of a mempool /api/v1/prices-shaped file used to convert a BTC-denominated order book price (BTC/rBTC/tBTC) into fiat. Set to an empty string to disable (a BTC book then cannot produce a rate)"
+default = "\"https://mempool.space/api/v1/prices\".to_owned()"
