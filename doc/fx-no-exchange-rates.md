@@ -43,7 +43,7 @@ instead of each re-deriving a model of their own.
    far above it. Every rate from this source is labeled `mining_cost_floor`
    in all outputs.
 
-## Exposure (per decision: banner + RPC + two JSON files)
+## Exposure (per decision: banner + RPC + two JSON files + optional HTTP endpoint)
 
 - **Banner**: a live line appended to the configured `server_banner`,
   e.g. `1 ELEK ~= $0.25 ~= 0.21 EUR (project registry reference rate)` or,
@@ -78,6 +78,17 @@ instead of each re-deriving a model of their own.
   elek-web serves it same-origin as `/fx/rates.json` (env `MM_WEB_FX_RATES`
   pointing at this file) when set; unset or missing file → HTTP 404 →
   the SPA treats the rate as disabled rather than inventing one.
+- **HTTP endpoint** (`fx_http_addr`, optional, unset = disabled): serves
+  the same two shapes as plain HTTP for consumers without Electrum access
+  (stats pages, scripts): `GET /fx/rates.json` (same body as
+  `fx_rates_path`, rich shape) and `GET /fx/prices.json` (same body as
+  `fx_snapshot_path`, mempool shape); any query string is stripped before
+  routing, unknown paths answer 404 `{"error":"not found"}`. Binds eagerly
+  at startup: a taken port aborts electrs, like the metrics endpoint does.
+  Keep it loopback-bound unless LAN reach is intended — Electrum wallet
+  clients get the same rate over their already-open server connection via
+  `blockchain.fx.rates` (the Elektron-Net wallet fork's `ElektronElectrs`
+  provider polls exactly that method).
 
 ## Failure behavior
 

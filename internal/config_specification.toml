@@ -209,3 +209,8 @@ name = "fx_btc_prices_url"
 type = "String"
 doc = "URL of a mempool /api/v1/prices-shaped file used to convert a BTC-denominated order book price (BTC/rBTC/tBTC) into fiat. Set to an empty string to disable (a BTC book then cannot produce a rate)"
 default = "\"https://mempool.space/api/v1/prices\".to_owned()"
+
+[[param]]
+name = "fx_http_addr"
+type = "crate::config::ResolvAddr"
+doc = "Optional HTTP endpoint serving this node's FX rates to consumers without Electrum access (wallets, stats pages): GET /fx/rates.json (same rich shape as fx_rates_path) and GET /fx/prices.json (same mempool shape as fx_snapshot_path). Unset = disabled; keep it loopback-bound unless LAN reach is intended"

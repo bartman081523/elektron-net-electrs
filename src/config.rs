@@ -168,6 +168,9 @@ pub struct Config {
     pub fx_orderbook_base: String,
     pub fx_orderbook_rel: String,
     pub fx_btc_prices_url: String,
+    /// Optional HTTP endpoint serving the FX rate files to non-Electrum
+    /// consumers (unset = disabled, see src/fx.rs FxHttp).
+    pub fx_http_addr: Option<SocketAddr>,
     pub signet_magic: Magic,
 }
 
@@ -408,6 +411,7 @@ impl Config {
             fx_orderbook_base: config.fx_orderbook_base,
             fx_orderbook_rel: config.fx_orderbook_rel,
             fx_btc_prices_url: config.fx_btc_prices_url,
+            fx_http_addr: config.fx_http_addr.map(|addr| addr.resolve_or_exit()),
             signet_magic: magic,
         };
         eprintln!(

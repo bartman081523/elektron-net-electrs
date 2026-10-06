@@ -39,7 +39,7 @@
 //! logged and tolerated: the last known-good snapshot is kept, and the
 //! thread only ever stops with the process.
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use parking_lot::RwLock;
 use serde_json::{json, Map, Value};
 use std::fmt;
@@ -49,6 +49,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bitcoincore_rpc::{Client, RpcApi};
+use tiny_http::{Header, Response, Server};
 
 use crate::config::{Config, SensitiveAuth};
 use crate::{daemon, thread};
@@ -233,20 +234,23 @@ impl RateState {
 
     /// Atomically write the mempool-shaped snapshot file (tmp + rename).
     pub fn write_mempool_snapshot(&self, path: &Path) -> Result<()> {
-        write_file_atomic(path, serde_json::to_string_pretty(&self.mempool_prices_json())?)
+        write_file_atomic(
+            path,
+            serde_json::to_string_pretty(&self.mempool_prices_json())?,
+        )
     }
 
-    /// Rich-shape rates file (source/market metadata, no -1 padding):
-    /// consumed by elek-web's `/fx` route for the SPA's rate display.
+    /// Rich-shape rates document (source/market metadata, no -1 padding):
+    /// written to `fx_rates_path` and served by `FxHttp` on `/fx/rates.json`.
     /// `usd: null` when no source is available - consumers treat that as
     /// "no rate", never as a price of zero.
-    pub fn write_rates_json(&self, path: &Path) -> Result<()> {
+    pub fn rates_json(&self) -> Value {
         let snapshot = self.get();
         let age_secs = match snapshot.source {
             RateSource::None => None,
             _ => Some(unix_now().saturating_sub(snapshot.updated_unix)),
         };
-        let body = json!({
+        json!({
             "ticker": "ELEK",
             "time": snapshot.updated_unix,
             "usd": snapshot.usd,
@@ -255,8 +259,12 @@ impl RateState {
             "age_secs": age_secs,
             "usd_per_btc": snapshot.usd_per_btc,
             "market": snapshot.market.as_ref().map(market_json),
-        });
-        write_file_atomic(path, serde_json::to_string_pretty(&body)?)
+        })
+    }
+
+    /// Atomically write the rich-shape rates file (tmp + rename).
+    pub fn write_rates_json(&self, path: &Path) -> Result<()> {
+        write_file_atomic(path, serde_json::to_string_pretty(&self.rates_json())?)
     }
 }
 
@@ -444,8 +452,11 @@ fn fetch_loop(cfg: FxConfig, state: Arc<RateState>) -> Result<()> {
             // Cost-floor fallback (user-selected combination: market first,
             // then registry, then the mining-energy model).
             if daemon_client.is_none() {
-                match daemon::connect_rpc(cfg.daemon_rpc_addr, &cfg.daemon_auth, cfg.jsonrpc_timeout)
-                {
+                match daemon::connect_rpc(
+                    cfg.daemon_rpc_addr,
+                    &cfg.daemon_auth,
+                    cfg.jsonrpc_timeout,
+                ) {
                     Ok(client) => daemon_client = Some(client),
                     Err(e) => warn!("fx: daemon RPC unavailable for cost-floor model: {:#}", e),
                 }
@@ -523,7 +534,8 @@ fn fetch_btc_prices(url: &str) -> Result<(f64, f64)> {
     let body = response
         .into_string()
         .context("BTC reference price response is not UTF-8")?;
-    let value: Value = serde_json::from_str(&body).context("BTC reference prices are not valid JSON")?;
+    let value: Value =
+        serde_json::from_str(&body).context("BTC reference prices are not valid JSON")?;
     let usd = value.get("USD").and_then(f64_from_value);
     let eur = value.get("EUR").and_then(f64_from_value);
     match (usd, eur) {
@@ -555,7 +567,8 @@ fn fetch_orderbook(ob: &ObConfig) -> Result<Option<Market>> {
     let text = response
         .into_string()
         .context("market daemon response is not UTF-8")?;
-    let value: Value = serde_json::from_str(&text).context("market daemon response is not valid JSON")?;
+    let value: Value =
+        serde_json::from_str(&text).context("market daemon response is not valid JSON")?;
     parse_orderbook(&value, &format!("{}/{}", ob.base, ob.rel))
 }
 
@@ -563,7 +576,10 @@ fn fetch_orderbook(ob: &ObConfig) -> Result<Option<Market>> {
 /// `price` (JSON number or string). Empty books return Ok(None) - that is an
 /// ordinary market state, the lookup falls through to the next source.
 fn parse_orderbook(value: &Value, pair: &str) -> Result<Option<Market>> {
-    let root = value.get("result").filter(|value| value.is_object()).unwrap_or(value);
+    let root = value
+        .get("result")
+        .filter(|value| value.is_object())
+        .unwrap_or(value);
     let asks = root
         .get("asks")
         .and_then(Value::as_array)
@@ -599,7 +615,9 @@ fn row_price(row: &Value) -> Option<f64> {
 /// Convert a book mid into (usd, eur). Known rels: USD/USDT (the price is
 /// already fiat), BTC (multiplied by the fetched BTC reference prices).
 fn market_rate(market: &Market, rel: &str, btc: Option<&(f64, f64)>) -> Result<(f64, f64)> {
-    let price = market.mid.ok_or_else(|| anyhow::anyhow!("order book is empty"))?;
+    let price = market
+        .mid
+        .ok_or_else(|| anyhow::anyhow!("order book is empty"))?;
     if !price.is_finite() || price <= 0.0 {
         anyhow::bail!("nonsensical order book price: {}", price);
     }
@@ -696,6 +714,69 @@ fn fmt_amount(value: f64) -> String {
     let formatted = format!("{:.10}", value);
     let formatted = formatted.trim_end_matches('0').trim_end_matches('.');
     formatted.to_owned()
+}
+
+/// Optional HTTP endpoint exposing this node's FX rates to consumers without
+/// Electrum access (wallets, stats pages). Exactly two routes, each answering
+/// from the same `RateState` that backs the Electrum banner and
+/// "blockchain.fx.rates" - one origin for the rate, not a second model:
+///
+///   * `GET /fx/rates.json`   - rich shape, same document as `fx_rates_path`,
+///   * `GET /fx/prices.json`  - mempool shape, same document as `fx_snapshot_path`.
+///
+/// Any other path is a JSON 404. Responses are compact JSON with a fixed
+/// `application/json` content type.
+pub struct FxHttp {
+    server: Server,
+}
+
+impl FxHttp {
+    /// Binds eagerly: a taken port is a fatal startup error (like the metrics
+    /// endpoint), never a silently missing rate endpoint.
+    pub fn new(addr: SocketAddr) -> Result<Self> {
+        let server = match Server::http(addr) {
+            Ok(server) => server,
+            Err(err) => bail!("failed to start FX HTTP server on {}: {}", addr, err),
+        };
+        info!(
+            "serving FX rates on http://{}/fx/rates.json and /fx/prices.json",
+            addr
+        );
+        Ok(Self { server })
+    }
+
+    /// Serve requests forever on a dedicated thread (like the metrics loop).
+    /// Per-request failures (client disconnects mid-response) are logged and
+    /// never stop the endpoint.
+    pub fn serve(self, state: Arc<RateState>) {
+        thread::spawn("fx_http", move || {
+            let json_type = Header::from_bytes(&b"Content-Type"[..], "application/json")
+                .expect("failed to create HTTP header for FX JSON");
+            for mut request in self.server.incoming_requests() {
+                let path = request.url().split('?').next().unwrap_or("");
+                let (status, body) = Self::route(&state, path);
+                // Drain any unread request body so keep-alive connections stay usable.
+                std::io::copy(&mut request.as_reader(), &mut std::io::sink()).ok();
+                let response = Response::from_data(body.into_bytes())
+                    .with_status_code(status)
+                    .with_header(json_type.clone());
+                if let Err(err) = request.respond(response) {
+                    debug!("fx: HTTP response failed: {:#}", err);
+                }
+            }
+            Ok(())
+        });
+    }
+
+    /// Pure routing decision - (status, body) for a request path, unit-testable
+    /// without sockets.
+    fn route(state: &RateState, path: &str) -> (u16, String) {
+        match path {
+            "/fx/rates.json" => (200, state.rates_json().to_string()),
+            "/fx/prices.json" => (200, state.mempool_prices_json().to_string()),
+            _ => (404, r#"{"error":"not found"}"#.to_owned()),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -835,8 +916,8 @@ mod tests {
 
     #[test]
     fn test_parse_orderbook_one_sided_and_empty() {
-        let value: Value = serde_json::from_str(r#"{"asks":[{"price":"0.0012"}],"bids":[]}"#)
-            .unwrap();
+        let value: Value =
+            serde_json::from_str(r#"{"asks":[{"price":"0.0012"}],"bids":[]}"#).unwrap();
         let market = parse_orderbook(&value, "ELEK/rBTC").unwrap().unwrap();
         assert_eq!(market.best_ask, Some(0.0012));
         assert_eq!(market.mid, Some(0.0012));
@@ -846,8 +927,8 @@ mod tests {
         assert!(parse_orderbook(&value, "ELEK/rBTC").unwrap().is_none());
 
         // Rows without a usable price count as empty, too.
-        let value: Value = serde_json::from_str(r#"{"asks":[{"price":-1}],"bids":[{"other":1}]}"#)
-            .unwrap();
+        let value: Value =
+            serde_json::from_str(r#"{"asks":[{"price":-1}],"bids":[{"other":1}]}"#).unwrap();
         assert!(parse_orderbook(&value, "ELEK/rBTC").unwrap().is_none());
     }
 
@@ -881,13 +962,11 @@ mod tests {
             asks: 1,
             bids: 1,
         };
-        let (usd, eur) =
-            market_rate(&market, "BTC", Some(&(60_000.0, 55_000.0))).unwrap();
+        let (usd, eur) = market_rate(&market, "BTC", Some(&(60_000.0, 55_000.0))).unwrap();
         assert_eq!(usd, 9.0);
         assert_eq!(eur, 8.25);
         // Regtest/testnet tickers of the BTC family use the same rate.
-        let (usd, eur) =
-            market_rate(&market, "rBTC", Some(&(60_000.0, 55_000.0))).unwrap();
+        let (usd, eur) = market_rate(&market, "rBTC", Some(&(60_000.0, 55_000.0))).unwrap();
         assert_eq!(usd, 9.0);
         assert_eq!(eur, 8.25);
 
@@ -912,5 +991,59 @@ mod tests {
         assert_eq!(fmt_amount(0.00036), "0.00036");
         assert_eq!(fmt_amount(1.0), "1");
         assert_eq!(fmt_amount(12.345), "12.345");
+    }
+
+    #[test]
+    fn test_fx_http_routes() {
+        let state = RateState::new();
+
+        // Before any source lands: the unavailable form is served, never a
+        // zero price (usd null in the rich shape, -1 padding in the mempool).
+        let (status, body) = FxHttp::route(&state, "/fx/rates.json");
+        assert_eq!(status, 200);
+        let value: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(value["ticker"], "ELEK");
+        assert!(value["usd"].is_null());
+        assert!(value["market"].is_null());
+
+        let (status, body) = FxHttp::route(&state, "/fx/prices.json");
+        assert_eq!(status, 200);
+        let value: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(value["time"], 0);
+        assert_eq!(value["USD"], -1.0);
+        assert_eq!(value["ZAR"], -1.0);
+
+        state.set(RateSnapshot {
+            usd: Some(0.25),
+            eur: Some(0.23),
+            updated_unix: 1_758_421_200,
+            source: RateSource::Registry,
+            market: None,
+            usd_per_btc: None,
+        });
+
+        // Rich shape keeps its metadata fields after a snapshot lands.
+        let (status, body) = FxHttp::route(&state, "/fx/rates.json");
+        assert_eq!(status, 200);
+        let value: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(value["usd"], 0.25);
+        assert_eq!(value["eur"], 0.23);
+        assert_eq!(value["source"], "registry");
+        assert_eq!(value["time"], 1_758_421_200);
+
+        // Mempool shape follows the same state (same origin, two shapes).
+        let (status, body) = FxHttp::route(&state, "/fx/prices.json");
+        assert_eq!(status, 200);
+        let value: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(value["USD"], 0.25);
+        assert_eq!(value["GBP"], -1.0);
+
+        // Unknown paths (and query strings) are a JSON 404 - no silent
+        // fallback shapes.
+        let (status, body) = FxHttp::route(&state, "/nope");
+        assert_eq!(status, 404);
+        assert_eq!(body, r#"{"error":"not found"}"#);
+        let (status, _) = FxHttp::route(&state, "/fx/rates.json?coin=elek");
+        assert_eq!(status, 404);
     }
 }

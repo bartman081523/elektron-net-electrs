@@ -74,6 +74,12 @@ fn serve() -> Result<()> {
     let rate_state = Arc::new(RateState::new());
     fx::spawn_fetcher(fx_config, rate_state.clone());
 
+    // Elektron Net FX: optional HTTP endpoint for non-Electrum consumers
+    // (disabled unless fx_http_addr is set); see src/fx.rs FxHttp.
+    if let Some(addr) = config.fx_http_addr {
+        fx::FxHttp::new(addr)?.serve(rate_state.clone());
+    }
+
     let (server_tx, server_rx) = unbounded();
     if !config.disable_electrum_rpc {
         let listener = TcpListener::bind(config.electrum_rpc_addr)?;
