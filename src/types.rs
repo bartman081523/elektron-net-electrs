@@ -211,7 +211,7 @@ pub(crate) struct SnapshotUnspentRow {
     pub(crate) prefix: HashPrefix, // scripthash prefix, for prefix-scan lookup
     pub(crate) txid: Txid,
     pub(crate) vout: u32,
-    pub(crate) value: u64, // amount, in satoshis
+    pub(crate) value: u64,     // amount, in satoshis
     pub(crate) height: Height, // the coin's original confirmation height, from the snapshot
 }
 
@@ -220,7 +220,13 @@ pub const SNAPSHOT_UNSPENT_ROW_SIZE: usize = HASH_PREFIX_LEN + 32 + 4 + 8 + HEIG
 impl_consensus_encoding!(SnapshotUnspentRow, prefix, txid, vout, value, height);
 
 impl SnapshotUnspentRow {
-    pub(crate) fn new(scripthash: ScriptHash, txid: Txid, vout: u32, value: u64, height: usize) -> Self {
+    pub(crate) fn new(
+        scripthash: ScriptHash,
+        txid: Txid,
+        vout: u32,
+        value: u64,
+        height: usize,
+    ) -> Self {
         Self {
             prefix: scripthash.prefix(),
             txid,

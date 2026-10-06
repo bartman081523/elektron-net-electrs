@@ -158,15 +158,15 @@ impl Index {
             Ok(()) => {}
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
             Err(err) => {
-                return Err(err)
-                    .with_context(|| format!("failed to remove stale snapshot file {}", path.display()))
+                return Err(err).with_context(|| {
+                    format!("failed to remove stale snapshot file {}", path.display())
+                })
             }
         }
 
         info!("starting UTXO-snapshot bootstrap: {}", path.display());
-        let (base_height, base_hash) = daemon
-            .dump_txoutset(&path)
-            .context("dumptxoutset failed")?;
+        let (base_height, base_hash) =
+            daemon.dump_txoutset(&path).context("dumptxoutset failed")?;
 
         let file = File::open(&path)
             .with_context(|| format!("failed to open snapshot file {}", path.display()))?;
@@ -220,7 +220,10 @@ impl Index {
     /// fresh as of *now*, so it always covers the gap regardless of how far
     /// behind we fell (not just the one-checkpoint case).
     fn ensure_no_prune_gap(&self, daemon: &Daemon, next_height: u32) -> Result<()> {
-        let prune_height = match daemon.get_prune_height().context("get_prune_height failed")? {
+        let prune_height = match daemon
+            .get_prune_height()
+            .context("get_prune_height failed")?
+        {
             Some(prune_height) => prune_height,
             None => return Ok(()), // daemon reports itself as not pruned
         };
@@ -251,7 +254,10 @@ impl Index {
     /// self-contained: unlike `filter_by_funding`, resolving these needs no
     /// re-fetch of a historical block, since that data is gone by design
     /// for anything at or below the bootstrap height.
-    pub(crate) fn get_snapshot_unspent(&self, scripthash: ScriptHash) -> Vec<(OutPoint, u64, usize)> {
+    pub(crate) fn get_snapshot_unspent(
+        &self,
+        scripthash: ScriptHash,
+    ) -> Vec<(OutPoint, u64, usize)> {
         self.store
             .iter_snapshot_unspent(SnapshotUnspentRow::scan_prefix(scripthash))
             .map(|row| {
@@ -400,18 +406,32 @@ impl Index {
             .expect("in-memory writers don't error");
         debug_assert_eq!(len, BlockHash::LEN);
 
-        // Heights at or below the §3.2 bootstrap height have no block body
-        // available anywhere on the network (that's exactly why bootstrap
-        // exists) -- record only the header, straight from the
-        // already-fetched `NewHeader` (P2P `getheaders`, body-independent),
-        // and skip the P2P body fetch entirely for them.
+        // Heights below the daemon's prune floor have no body to fetch --
+        // record only the header, straight from the already-fetched
+        // `NewHeader` (P2P `getheaders`, body-independent). Heights from the
+        // prune floor up -- including anything below the §3.2 bootstrap
+        // height that the daemon still retains -- are fetched and indexed
+        // normally, so the scripthash history covers the full retention
+        // window instead of stopping at the bootstrap height. The snapshot's
+        // seeded unspent rows intentionally overlap with the funding rows
+        // written here: `Unspent::build` inserts snapshot rows first and
+        // folds the ordinary entries over them, keyed by outpoint, so
+        // there's no double counting either way.
         let bootstrap_height = self.store.get_bootstrap_height();
+        let prune_height = daemon.get_prune_height().ok().flatten();
         let mut to_fetch: Vec<&NewHeader> = Vec::with_capacity(chunk.len());
         for new_header in chunk {
-            let below_bootstrap = bootstrap_height
-                .map(|h| new_header.height() as u32 <= h)
-                .unwrap_or(false);
-            if below_bootstrap {
+            let body_unavailable = match prune_height {
+                // pruneheight = first unpruned block; everything before it is
+                // pruned away on this daemon
+                Some(p) => (new_header.height() as u32) < p,
+                // daemon reports no pruning: keep the old behavior (header
+                // rows up to the bootstrap height, bodies from there on)
+                None => bootstrap_height
+                    .map(|h| new_header.height() as u32 <= h)
+                    .unwrap_or(false),
+            };
+            if body_unavailable {
                 batch
                     .header_rows
                     .push(HeaderRow::new(new_header.header()).to_db_row());
