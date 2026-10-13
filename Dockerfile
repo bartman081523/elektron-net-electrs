@@ -8,7 +8,14 @@ RUN apt-get install -qqy librocksdb-dev curl
 
 ### Electrum Rust Server ###
 FROM base AS electrs-build
-RUN apt-get install -qqy cargo clang cmake
+# Debian's apt cargo (bookworm: 1.63) cannot parse edition-2024 dependency
+# manifests - e.g. the locked zeroize 1.9.0 dies with "failed to parse the
+# `edition` key" (exit 101) - and the registry keeps drifting forward. Use
+# the rolling stable toolchain instead, matching the
+# dtolnay/rust-toolchain@stable matrix job in .github/workflows/rust.yml.
+RUN apt-get install -qqy ca-certificates clang cmake
+RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+ENV PATH=/root/.cargo/bin:$PATH
 
 # Install electrs
 WORKDIR /build/electrs
