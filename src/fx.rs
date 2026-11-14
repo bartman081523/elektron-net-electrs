@@ -114,7 +114,7 @@ pub struct Market {
     pub mid: Option<f64>,
     /// Volume-Weighted Average Price across all depth in the orderbook.
     pub vwap: Option<f64>,
-    /// Aggregate volume of all orders contributing to the VWAP.
+    /// Aggregate base-coin volume of all orders contributing to the VWAP.
     pub total_volume: f64,
     pub asks: usize,
     pub bids: usize,
@@ -600,14 +600,21 @@ fn parse_orderbook(value: &Value, pair: &str) -> Result<Option<Market>> {
         return Ok(None);
     }
 
-    let mut total_val = 0.0;
-    let mut total_vol = 0.0;
-    for (p, v) in asks.iter().chain(bids.iter()).filter_map(row_price_and_volume) {
-        total_val += p * v;
-        total_vol += v;
+    let mut total_notional = 0.0;
+    let mut total_base = 0.0;
+    let depth = asks
+        .iter()
+        .filter_map(|row| row_notional_and_base(row, true))
+        .chain(
+            bids.iter()
+                .filter_map(|row| row_notional_and_base(row, false)),
+        );
+    for (notional, base) in depth {
+        total_notional += notional;
+        total_base += base;
     }
-    let vwap = if total_vol > 0.0 {
-        Some(total_val / total_vol)
+    let vwap = if total_base > 0.0 {
+        Some(total_notional / total_base)
     } else {
         None
     };
@@ -622,7 +629,7 @@ fn parse_orderbook(value: &Value, pair: &str) -> Result<Option<Market>> {
             .or(best_ask)
             .or(best_bid),
         vwap,
-        total_volume: total_vol,
+        total_volume: total_base,
         asks: asks.len(),
         bids: bids.len(),
     }))
@@ -633,17 +640,38 @@ fn row_price(row: &Value) -> Option<f64> {
     row.get("price").and_then(f64_from_value)
 }
 
-/// Row price and volume; non-positive price rows are ignored.
-/// Volume defaults to 1.0 if not explicitly specified.
-fn row_price_and_volume(row: &Value) -> Option<(f64, f64)> {
+/// A book row as `(rel notional, base volume)`; non-positive prices and rows
+/// without a usable volume are ignored.
+///
+/// The market daemon reports `base_max_volume` and `rel_max_volume` for both
+/// sides, so those win when present. A bare `maxvolume` is the base amount on
+/// the ask side but the rel amount on the bid side; summing the two as they
+/// are would add BTC to ELEK.
+fn row_notional_and_base(row: &Value, is_ask: bool) -> Option<(f64, f64)> {
     let price = row_price(row)?;
+    if !price.is_finite() || price <= 0.0 {
+        return None;
+    }
+    let base = row.get("base_max_volume").and_then(f64_from_value);
+    let rel = row.get("rel_max_volume").and_then(f64_from_value);
+    if let (Some(base), Some(rel)) = (base, rel) {
+        if base > 0.0 && rel > 0.0 {
+            return Some((rel, base));
+        }
+    }
     let volume = row
         .get("maxvolume")
         .or_else(|| row.get("volume"))
         .or_else(|| row.get("base_volume"))
-        .and_then(f64_from_value)
-        .unwrap_or(1.0);
-    Some((price, volume))
+        .and_then(f64_from_value)?;
+    if !volume.is_finite() || volume <= 0.0 {
+        return None;
+    }
+    if is_ask {
+        Some((price * volume, volume))
+    } else {
+        Some((volume, volume / price))
+    }
 }
 
 /// Convert a book rate into (usd, eur). Uses VWAP across book depth if
@@ -971,6 +999,57 @@ mod tests {
         let vwap = market.vwap.expect("vwap calculated");
         assert!((vwap - 0.0000000054).abs() < 1e-11);
         assert!((market.total_volume - 2000.00001).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_parse_orderbook_vwap_normalises_bid_volume() {
+        // The daemon reports a bid's `maxvolume` in the rel coin: 0.000108
+        // tBTC is 2,000 tELEK at 0.000000054. Summing it as base volume
+        // would make the depth 0.000108 tELEK instead of 2,000.
+        let value: Value = serde_json::from_str(
+            r#"{"asks":[],"bids":[{"price":"0.000000054","maxvolume":"0.000108"}]}"#,
+        )
+        .unwrap();
+        let market = parse_orderbook(&value, "tELEK/tBTC").unwrap().unwrap();
+        assert_eq!(market.best_bid, Some(0.000000054));
+        assert!((market.vwap.unwrap() - 0.000000054).abs() < 1e-15);
+        assert!((market.total_volume - 2000.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_parse_orderbook_vwap_mixes_sides_in_base_units() {
+        // Ask: 100 base at 1.0 rel -> 100 rel. Bid: 100 rel at 0.5 -> 200 base.
+        // Notional 200 over 300 base is 2/3, not (1.0 + 0.5) / 2.
+        let value: Value = serde_json::from_str(
+            r#"{"asks":[{"price":"1","maxvolume":"100"}],"bids":[{"price":"0.5","maxvolume":"100"}]}"#,
+        )
+        .unwrap();
+        let market = parse_orderbook(&value, "BASE/REL").unwrap().unwrap();
+        let vwap = market.vwap.unwrap();
+        assert!((vwap - 2.0 / 3.0).abs() < 1e-12);
+        assert!((market.total_volume - 300.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_parse_orderbook_prefers_explicit_volumes() {
+        // Daemon shape: the explicit base/rel volumes win over `maxvolume`,
+        // which is intentionally bogus here.
+        let value: Value = serde_json::from_str(
+            r#"{"asks":[{"price":"0.5","maxvolume":"999","base_max_volume":"250","rel_max_volume":"125"}],"bids":[]}"#,
+        )
+        .unwrap();
+        let market = parse_orderbook(&value, "BASE/REL").unwrap().unwrap();
+        assert!((market.total_volume - 250.0).abs() < 1e-9);
+        assert!((market.vwap.unwrap() - 0.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_parse_orderbook_ignores_rows_without_volume() {
+        let value: Value =
+            serde_json::from_str(r#"{"asks":[{"price":"0.0012"}],"bids":[]}"#).unwrap();
+        let market = parse_orderbook(&value, "ELEK/rBTC").unwrap().unwrap();
+        assert_eq!(market.vwap, None);
+        assert_eq!(market.total_volume, 0.0);
     }
 
     #[test]
