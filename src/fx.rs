@@ -112,6 +112,10 @@ pub struct Market {
     pub best_bid: Option<f64>,
     pub best_ask: Option<f64>,
     pub mid: Option<f64>,
+    /// Volume-Weighted Average Price across all depth in the orderbook.
+    pub vwap: Option<f64>,
+    /// Aggregate volume of all orders contributing to the VWAP.
+    pub total_volume: f64,
     pub asks: usize,
     pub bids: usize,
 }
@@ -275,6 +279,8 @@ fn market_json(market: &Market) -> Value {
         "best_bid": market.best_bid,
         "best_ask": market.best_ask,
         "mid": market.mid,
+        "vwap": market.vwap,
+        "total_volume": market.total_volume,
         "asks": market.asks,
         "bids": market.bids,
     })
@@ -593,6 +599,19 @@ fn parse_orderbook(value: &Value, pair: &str) -> Result<Option<Market>> {
     if best_ask.is_none() && best_bid.is_none() {
         return Ok(None);
     }
+
+    let mut total_val = 0.0;
+    let mut total_vol = 0.0;
+    for (p, v) in asks.iter().chain(bids.iter()).filter_map(row_price_and_volume) {
+        total_val += p * v;
+        total_vol += v;
+    }
+    let vwap = if total_vol > 0.0 {
+        Some(total_val / total_vol)
+    } else {
+        None
+    };
+
     Ok(Some(Market {
         pair: pair.to_owned(),
         best_bid,
@@ -602,6 +621,8 @@ fn parse_orderbook(value: &Value, pair: &str) -> Result<Option<Market>> {
             .map(|(bid, ask)| (bid + ask) / 2.0)
             .or(best_ask)
             .or(best_bid),
+        vwap,
+        total_volume: total_vol,
         asks: asks.len(),
         bids: bids.len(),
     }))
@@ -612,11 +633,26 @@ fn row_price(row: &Value) -> Option<f64> {
     row.get("price").and_then(f64_from_value)
 }
 
-/// Convert a book mid into (usd, eur). Known rels: USD/USDT (the price is
+/// Row price and volume; non-positive price rows are ignored.
+/// Volume defaults to 1.0 if not explicitly specified.
+fn row_price_and_volume(row: &Value) -> Option<(f64, f64)> {
+    let price = row_price(row)?;
+    let volume = row
+        .get("maxvolume")
+        .or_else(|| row.get("volume"))
+        .or_else(|| row.get("base_volume"))
+        .and_then(f64_from_value)
+        .unwrap_or(1.0);
+    Some((price, volume))
+}
+
+/// Convert a book rate into (usd, eur). Uses VWAP across book depth if
+/// available, falling back to mid price. Known rels: USD/USDT (the price is
 /// already fiat), BTC (multiplied by the fetched BTC reference prices).
 fn market_rate(market: &Market, rel: &str, btc: Option<&(f64, f64)>) -> Result<(f64, f64)> {
     let price = market
-        .mid
+        .vwap
+        .or(market.mid)
         .ok_or_else(|| anyhow::anyhow!("order book is empty"))?;
     if !price.is_finite() || price <= 0.0 {
         anyhow::bail!("nonsensical order book price: {}", price);
@@ -881,6 +917,8 @@ mod tests {
                 best_bid: None,
                 best_ask: Some(0.0008),
                 mid: Some(0.0008),
+                vwap: Some(0.0008),
+                total_volume: 100.0,
                 asks: 1,
                 bids: 0,
             }),
@@ -895,6 +933,8 @@ mod tests {
         assert_eq!(rpc["usd_per_btc"], 65_000.0);
         assert_eq!(rpc["market"]["pair"], "ELEK/BTC");
         assert_eq!(rpc["market"]["asks"], 1);
+        assert_eq!(rpc["market"]["vwap"], 0.0008);
+        assert_eq!(rpc["market"]["total_volume"], 100.0);
         // The mempool shape stays a pure fiat list: no market metadata.
         assert_eq!(state.mempool_prices_json()["USD"], 52.0);
     }
@@ -912,6 +952,25 @@ mod tests {
         assert_eq!(market.mid, Some((0.001 + 0.0011) / 2.0));
         assert_eq!(market.asks, 2);
         assert_eq!(market.bids, 1);
+    }
+
+    #[test]
+    fn test_parse_orderbook_vwap_weighted() {
+        // Test volume-weighted averaging and dust order resistance:
+        // Huge order: 2000 ELEK @ 0.0000000054 BTC
+        // Dust order: 0.00001 ELEK @ 0.001 BTC
+        let value: Value = serde_json::from_str(
+            r#"{"asks":[{"price":0.0000000054,"maxvolume":"2000"},{"price":0.001,"maxvolume":"0.00001"}],"bids":[]}"#,
+        )
+        .unwrap();
+        let market = parse_orderbook(&value, "ELEK/BTC").unwrap().unwrap();
+        assert_eq!(market.best_ask, Some(0.0000000054));
+        assert_eq!(market.asks, 2);
+        // Simple mid would be ~0.0005 BTC (huge distortion by dust order).
+        // VWAP should stay extremely close to 0.0000000054 BTC.
+        let vwap = market.vwap.expect("vwap calculated");
+        assert!((vwap - 0.0000000054).abs() < 1e-11);
+        assert!((market.total_volume - 2000.00001).abs() < 1e-5);
     }
 
     #[test]
@@ -947,6 +1006,8 @@ mod tests {
             best_bid: None,
             best_ask: Some(0.5),
             mid: Some(0.5),
+            vwap: Some(0.5),
+            total_volume: 50.0,
             asks: 1,
             bids: 0,
         };
@@ -959,6 +1020,8 @@ mod tests {
             best_bid: Some(0.0001),
             best_ask: Some(0.0002),
             mid: Some(0.00015),
+            vwap: Some(0.00015),
+            total_volume: 200.0,
             asks: 1,
             bids: 1,
         };
