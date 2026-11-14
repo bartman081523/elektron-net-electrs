@@ -148,25 +148,52 @@ impl Index {
             .expect("bootstrap() only called when utxo_snapshot_dir is set");
         let path = dir.join("electrs-bootstrap.dat");
 
-        // dumptxoutset refuses to overwrite an existing file. Harmless to
-        // find one here: either this is a from-scratch bootstrap and a
-        // previous attempt left a stale file behind, or `ensure_no_prune_gap`
-        // is re-running the bootstrap and the first run's file is still
-        // sitting on the shared mount -- either way we're about to replace
-        // it with a fresh one and have no further use for the old contents.
-        match std::fs::remove_file(&path) {
-            Ok(()) => {}
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => {
-                return Err(err).with_context(|| {
-                    format!("failed to remove stale snapshot file {}", path.display())
-                })
+        // The daemon may live on another machine (a phone reached over adb):
+        // then `dumptxoutset` cannot write into this directory at all. In that
+        // setup the snapshot is pulled from the daemon by hand and handed in
+        // through ELECTRS_UTXO_SNAPSHOT_FILE, with its height in
+        // ELECTRS_UTXO_SNAPSHOT_HEIGHT (the file name carries it, but the
+        // format has no height field).
+        let provided = std::env::var_os("ELECTRS_UTXO_SNAPSHOT_FILE").map(PathBuf::from);
+        let (base_height, base_hash) = match provided {
+            Some(source) => {
+                let height: u32 = std::env::var("ELECTRS_UTXO_SNAPSHOT_HEIGHT")
+                    .context("ELECTRS_UTXO_SNAPSHOT_HEIGHT is not set")?
+                    .parse()
+                    .context("ELECTRS_UTXO_SNAPSHOT_HEIGHT is not a number")?;
+                std::fs::copy(&source, &path).with_context(|| {
+                    format!(
+                        "copying snapshot {} to {}",
+                        source.display(),
+                        path.display()
+                    )
+                })?;
+                let mut reader = BufReader::new(File::open(&path)?);
+                let metadata = snapshot::SnapshotMetadata::read(&mut reader, self.network_magic)
+                    .context("failed to read snapshot metadata")?;
+                (height, metadata.base_blockhash)
             }
-        }
+            None => {
+                // dumptxoutset refuses to overwrite an existing file. Harmless to
+                // find one here: either this is a from-scratch bootstrap and a
+                // previous attempt left a stale file behind, or `ensure_no_prune_gap`
+                // is re-running the bootstrap and the first run's file is still
+                // sitting on the shared mount -- either way we're about to replace
+                // it with a fresh one and have no further use for the old contents.
+                match std::fs::remove_file(&path) {
+                    Ok(()) => {}
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(err) => {
+                        return Err(err).with_context(|| {
+                            format!("failed to remove stale snapshot file {}", path.display())
+                        })
+                    }
+                }
 
-        info!("starting UTXO-snapshot bootstrap: {}", path.display());
-        let (base_height, base_hash) =
-            daemon.dump_txoutset(&path).context("dumptxoutset failed")?;
+                info!("starting UTXO-snapshot bootstrap: {}", path.display());
+                daemon.dump_txoutset(&path).context("dumptxoutset failed")?
+            }
+        };
 
         let file = File::open(&path)
             .with_context(|| format!("failed to open snapshot file {}", path.display()))?;
