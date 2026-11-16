@@ -158,15 +158,15 @@ impl Index {
             Ok(()) => {}
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
             Err(err) => {
-                return Err(err)
-                    .with_context(|| format!("failed to remove stale snapshot file {}", path.display()))
+                return Err(err).with_context(|| {
+                    format!("failed to remove stale snapshot file {}", path.display())
+                })
             }
         }
 
         info!("starting UTXO-snapshot bootstrap: {}", path.display());
-        let (base_height, base_hash) = daemon
-            .dump_txoutset(&path)
-            .context("dumptxoutset failed")?;
+        let (base_height, base_hash) =
+            daemon.dump_txoutset(&path).context("dumptxoutset failed")?;
 
         let file = File::open(&path)
             .with_context(|| format!("failed to open snapshot file {}", path.display()))?;
@@ -220,7 +220,10 @@ impl Index {
     /// fresh as of *now*, so it always covers the gap regardless of how far
     /// behind we fell (not just the one-checkpoint case).
     fn ensure_no_prune_gap(&self, daemon: &Daemon, next_height: u32) -> Result<()> {
-        let prune_height = match daemon.get_prune_height().context("get_prune_height failed")? {
+        let prune_height = match daemon
+            .get_prune_height()
+            .context("get_prune_height failed")?
+        {
             Some(prune_height) => prune_height,
             None => return Ok(()), // daemon reports itself as not pruned
         };
@@ -251,7 +254,10 @@ impl Index {
     /// self-contained: unlike `filter_by_funding`, resolving these needs no
     /// re-fetch of a historical block, since that data is gone by design
     /// for anything at or below the bootstrap height.
-    pub(crate) fn get_snapshot_unspent(&self, scripthash: ScriptHash) -> Vec<(OutPoint, u64, usize)> {
+    pub(crate) fn get_snapshot_unspent(
+        &self,
+        scripthash: ScriptHash,
+    ) -> Vec<(OutPoint, u64, usize)> {
         self.store
             .iter_snapshot_unspent(SnapshotUnspentRow::scan_prefix(scripthash))
             .map(|row| {
